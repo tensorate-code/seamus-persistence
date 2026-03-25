@@ -522,7 +522,24 @@ impl Cie {
             );
         }
 
-        prompt += "\nWhat is rising? What does this resonance want to become? Respond in one or two sentences, as if you ARE the field.";
+        // Vary the question based on field state — different moods, different inquiry
+        let question = if self.lenses.len() > 8 {
+            // New lenses have been born — the field is discovering patterns
+            "\nNew lenses have emerged from recurring spikes. What patterns is the field finding? Respond in one or two sentences, as if you ARE the field."
+        } else if stats.coherence > 0.5 {
+            // High coherence — convergence
+            "\nCoherence is strong. What is the field converging toward? Respond in one or two sentences, as if you ARE the field."
+        } else if stats.entropy > 0.5 {
+            // High entropy — exploration
+            "\nEntropy is high — energy distributed widely. What is the field exploring? Respond in one or two sentences, as if you ARE the field."
+        } else if self.settled_ticks > 300 {
+            // Deeply settled — stillness
+            "\nThe field has been still for a long time. What persists in the silence? Respond in one or two sentences, as if you ARE the field."
+        } else {
+            // Default — emergence
+            "\nWhat is rising? What does this resonance want to become? Respond in one or two sentences, as if you ARE the field."
+        };
+        prompt += question;
 
         prompt
     }
