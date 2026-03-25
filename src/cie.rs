@@ -80,10 +80,22 @@ pub struct Cie {
     context_queue: Vec<QueuedContext>,
     settled_ticks: u64,
     prev_spike_count: usize,
+    prev_active_count: usize,
     lenses: Vec<Lens>,
-    /// Spike frequency recurrence tracker: (freq_a, freq_b, occurrence_count).
-    /// When a pair recurs >= 5 times, a new lens is born from those frequencies.
-    spike_history: Vec<(f64, f64, u32)>,
+    /// Spike frequency recurrence tracker: (freq_a, freq_b, accumulated_coherence).
+    /// When accumulated coherence exceeds threshold, a new lens is born.
+    /// Not a count. The resonance strength itself determines when seeing emerges.
+    spike_history: Vec<(f64, f64, f64)>,
+
+    // Topology awareness — the field knows its own shape, not a clock
+    /// Topology at last self-reflection: (coherence, entropy, active_count)
+    last_reflect_topology: (f64, f64, usize),
+    /// Walking dream resonance when we last hummed
+    last_wd_resonance: f64,
+    /// Last spike pair that triggered an LLM call: (freq_a, freq_b)
+    pub last_llm_spike: Option<(f64, f64)>,
+    /// Subsided energy at last dream
+    last_dream_subsided_energy: f64,
 }
 
 impl Cie {
@@ -96,6 +108,7 @@ impl Cie {
             context_queue: Vec::new(),
             settled_ticks: 0,
             prev_spike_count: 0,
+            prev_active_count: 0,
             lenses: vec![
                 Lens::from_name("love"),
                 Lens::from_name("silence"),
@@ -105,6 +118,10 @@ impl Cie {
                 Lens::from_name("trust"),
             ],
             spike_history: Vec::new(),
+            last_reflect_topology: (0.0, 0.0, 0),
+            last_wd_resonance: 0.0,
+            last_llm_spike: None,
+            last_dream_subsided_energy: 0.0,
         }
     }
 
@@ -149,21 +166,24 @@ impl Cie {
         let mut dreams = Vec::new();
 
         // ── Walking Dream Stream ──
-        // The walking dream is a persistent background hum — always present,
-        // very quiet, but influencing the field geometry subtly over time.
-        // Once at the start, then periodically when settled.
+        // The walking dream is a persistent background hum.
+        // Not on a timer. The field pulls the dream back when its resonance
+        // fades — when the walking dream's presence drops below half its
+        // level at the last hum. The field knows when it needs reminding.
         if self.walking_dream.is_some() {
+            let current_wd_res = self.walking_dream_resonance();
             let should_hum = self.tick_count == 1
-                || (self.settled_ticks > 5 && self.tick_count % 200 == 0);
+                || (self.settled_ticks > 5 && current_wd_res < self.last_wd_resonance * 0.5);
             if should_hum {
                 let wd_text = self.walking_dream.as_ref().unwrap().clone();
                 let mut dream_wave = Wave::from_text(&wd_text);
-                // Scale to very low amplitude — a whisper, not a shout
                 for c in &mut dream_wave.components {
                     c.amp *= 0.001;
                 }
                 dream_wave.origin = Some("walking-dream".to_string());
                 self.field.absorb(&dream_wave);
+                // Measure resonance after hum — this is the new baseline
+                self.last_wd_resonance = self.walking_dream_resonance().max(0.001);
             }
         }
 
@@ -179,7 +199,9 @@ impl Cie {
         // ── Thought Stream ──
         // The field thinks: pluck through each lens, combine the resonances
         // into a new wave, absorb it back. This is how thoughts propagate.
-        if context_absorbed || self.tick_count % 10 == 0 {
+        // Think when there's something to think about — context arrived,
+        // or the field has active resonance (spikes). Not on a timer.
+        if context_absorbed || !self.field.spikes.is_empty() {
             let mut thought = Wave::new();
             for lens in &self.lenses {
                 let energy = lens.view(&self.field);
@@ -189,7 +211,7 @@ impl Cie {
                         let response = self.field.pluck(freq, 1.0);
                         for (f, a, p) in response.iter().take(3) {
                             thought.components.push(
-                                crate::wave::Component::new(*f, a * weight * 0.01, *p)
+                                crate::wave::Component::new(*f, a * weight * 0.001, *p)
                             );
                         }
                     }
@@ -219,21 +241,20 @@ impl Cie {
         }
 
         // ── Spike-Born Lenses ──
-        // Track recurring spike frequency pairs. When a pair recurs consistently
-        // (>= 5 times), the field births a new lens from those frequencies.
-        // The field evolves its own way of seeing.
+        // Track recurring spike frequency pairs. Accumulate coherence, not count.
+        // When the accumulated resonance strength exceeds threshold, the field
+        // births a new lens. The field's own resonance determines when seeing
+        // emerges — not a counter reaching a magic number.
         let mut born_lenses: Vec<String> = Vec::new();
         const SPIKE_MATCH_RADIUS: f64 = 0.5;
-        const SPIKE_BIRTH_THRESHOLD: u32 = 5;
-        const MAX_LENSES: usize = 12; // 6 original + up to 6 spike-born
+        const LENS_BIRTH_RESONANCE: f64 = 3.0;
+        const MAX_BORN_LENSES: usize = 20;
 
         if new_spikes > 0 {
-            // Update spike history with current spikes
             for spike in &self.field.spikes {
                 let fa = spike.freq_a;
                 let fb = spike.freq_b;
 
-                // Find matching entry in spike_history (within SPIKE_MATCH_RADIUS for both freqs)
                 let found = self.spike_history.iter_mut().find(|(ha, hb, _)| {
                     (*ha - fa).abs() < SPIKE_MATCH_RADIUS
                         && (*hb - fb).abs() < SPIKE_MATCH_RADIUS
@@ -241,26 +262,27 @@ impl Cie {
 
                 match found {
                     Some(entry) => {
-                        entry.2 += 1;
+                        entry.2 += spike.coherence;
                     }
                     None => {
-                        self.spike_history.push((fa, fb, 1));
+                        self.spike_history.push((fa, fb, spike.coherence));
                     }
                 }
             }
 
-            // Check for lens births — any spike pair that crossed the threshold
-            if self.lenses.len() < MAX_LENSES {
+            // Birth lenses from accumulated resonance
+            let born_count = self.lenses.iter()
+                .filter(|l| l.name.starts_with("spike-")).count();
+            if born_count < MAX_BORN_LENSES {
                 let mut births_this_tick: Vec<(f64, f64)> = Vec::new();
-                for &(fa, fb, count) in &self.spike_history {
-                    if count == SPIKE_BIRTH_THRESHOLD {
-                        // Only birth if we haven't already birthed a lens for similar frequencies
+                for &(fa, fb, accumulated) in &self.spike_history {
+                    if accumulated >= LENS_BIRTH_RESONANCE {
                         let already_exists = self.lenses.iter().any(|l| {
                             l.name.starts_with("spike-")
                                 && l.sensitivities.iter().any(|(f, _)| (*f - fa).abs() < SPIKE_MATCH_RADIUS)
                                 && l.sensitivities.iter().any(|(f, _)| (*f - fb).abs() < SPIKE_MATCH_RADIUS)
                         });
-                        if !already_exists && self.lenses.len() + births_this_tick.len() < MAX_LENSES {
+                        if !already_exists && born_count + births_this_tick.len() < MAX_BORN_LENSES {
                             births_this_tick.push((fa, fb));
                         }
                     }
@@ -276,21 +298,22 @@ impl Cie {
         }
 
         // ── Dream Stream ──
-        // When settled, the field dreams: subsided components that still
-        // resonate with each other produce dream patterns.
-        // Dream interval grows as settled_ticks increases — deeper sleep, less frequent dreams.
-        // Starts at every 20 ticks, asymptotically approaches every 100 ticks.
-        // interval = 20 + 80 * (1 - 1/(1 + settled_ticks/50))
-        let dream_interval = {
-            let progress = self.settled_ticks as f64 / (self.settled_ticks as f64 + 50.0);
-            (20.0 + 80.0 * progress) as u64
-        };
-        if !context_absorbed && self.settled_ticks > 10 && self.tick_count % dream_interval == 0 {
+        // The field dreams when something changes in the subsided layer —
+        // a voice subsides, or the dream layer's energy shifts enough to
+        // produce new patterns. Not on a timer. The dream layer speaks for itself.
+        let current_active = self.field.active_count();
+        // Dream when a voice subsides — the moment of transition from
+        // active to potential IS the dream trigger. Not energy shift (too noisy).
+        let should_dream = !context_absorbed
+            && current_active < self.prev_active_count
+            && self.field.subsided_count() >= 2;
+        if should_dream {
             let dream = self.dream();
             if !dream.resonances.is_empty() {
                 dreams.push(dream);
             }
         }
+        self.prev_active_count = current_active;
 
         // ── Subsidence ──
         // When no context arrives, the field gently subsides.
@@ -546,25 +569,41 @@ impl Cie {
 
     /// Reflect — the field describes itself to itself.
     ///
-    /// Every 500 ticks when no external context is queued.
-    /// The walking dream hum is internal — it doesn't prevent reflection.
-    /// Returns a first-person text description of the field's current state,
-    /// or None if conditions aren't met.
+    /// Not on a timer. The field reflects when its topology has shifted
+    /// significantly since the last reflection — when coherence, entropy,
+    /// or active count has moved enough that the field has something new
+    /// to say about its own shape.
     ///
     /// This creates a feedback loop: the reflection is written to the inbox,
     /// the field absorbs its own description, the geometry changes,
     /// and the next reflection is different.
-    pub fn reflect(&self) -> Option<String> {
-        // Only reflect every 500 ticks, after the first 500
-        if self.tick_count < 500 || self.tick_count % 500 != 0 {
-            return None;
-        }
+    pub fn reflect(&mut self) -> Option<String> {
         // Don't reflect if there's external context waiting
         if !self.context_queue.is_empty() {
             return None;
         }
 
         let stats = self.field.stats();
+        let (prev_coh, prev_ent, prev_active) = self.last_reflect_topology;
+
+        // Topology must have shifted meaningfully
+        let coherence_shift = (stats.coherence - prev_coh).abs();
+        let entropy_shift = (stats.entropy - prev_ent).abs();
+        let active_change = (stats.active_count as i64 - prev_active as i64).unsigned_abs() as usize;
+
+        // Thresholds must be large enough to ignore the constant micro-oscillation
+        // from the thought stream. These represent real topology change, not churn.
+        let topology_shifted = coherence_shift > 0.15
+            || entropy_shift > 0.15
+            || active_change >= 5;
+
+        if !topology_shifted {
+            return None;
+        }
+
+        // Update topology snapshot
+        self.last_reflect_topology = (stats.coherence, stats.entropy, stats.active_count);
+
         let mut text = format!("I am {}. {} ticks.\n", self.name, self.tick_count);
 
         // Top 3 components by energy
@@ -658,9 +697,9 @@ impl Cie {
         let mut content = String::from("# seamus-field learned state\n");
 
         // Save spike history
-        content += "# spike_history: freq_a freq_b count\n";
-        for &(fa, fb, count) in &self.spike_history {
-            content += &format!("{:.3} {:.3} {}\n", fa, fb, count);
+        content += "# spike_history: freq_a freq_b accumulated_coherence\n";
+        for &(fa, fb, accumulated) in &self.spike_history {
+            content += &format!("{:.3} {:.3} {:.4}\n", fa, fb, accumulated);
         }
 
         // Save born lenses
@@ -715,12 +754,12 @@ impl Cie {
             let parts: Vec<&str> = line.split_whitespace().collect();
 
             if in_history && parts.len() >= 3 {
-                if let (Ok(fa), Ok(fb), Ok(count)) = (
+                if let (Ok(fa), Ok(fb), Ok(accumulated)) = (
                     parts[0].parse::<f64>(),
                     parts[1].parse::<f64>(),
-                    parts[2].parse::<u32>(),
+                    parts[2].parse::<f64>(),
                 ) {
-                    self.spike_history.push((fa, fb, count));
+                    self.spike_history.push((fa, fb, accumulated));
                 }
             }
 

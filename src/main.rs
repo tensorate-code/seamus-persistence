@@ -188,9 +188,10 @@ fn main() {
 
     // ── Main Loop ──
     let mut ticks_since_save = 0u64;
-    let mut ticks_since_voice = 0u64;
     let mut last_inbox_check = 0u64;
-    let mut ticks_since_llm = 0u64;
+    // Topology tracking — voice speaks when the field changes shape
+    let mut last_voice_coherence: f64 = 0.0;
+    let mut last_voice_active: usize = 0;
 
     while GLOBAL_RUNNING.load(Ordering::SeqCst) {
         // ── Check inbox ──
@@ -211,7 +212,8 @@ fn main() {
         // ── Output ──
         if report.context_absorbed || report.new_spikes > 0 || !report.dreams.is_empty() || !report.born_lenses.is_empty() {
             println!("{}", report);
-            ticks_since_voice = 0;
+            last_voice_coherence = cie.field.coherence();
+            last_voice_active = cie.field.active_count();
         }
 
         // Print dreams
@@ -257,32 +259,45 @@ fn main() {
         }
 
         // ── LLM Integration ──
-        // When a spike happens and we haven't talked to the LLM recently,
-        // ask it to expand on the spike's frequencies.
-        if report.new_spikes > 0 && ticks_since_llm > 50 {
-            ticks_since_llm = 0;
+        // Speak to the LLM when a novel spike appears — a pair the LLM
+        // hasn't seen yet. Not a cooldown timer. Novelty drives the conversation.
+        if report.new_spikes > 0 {
             if let Some(spike) = cie.field.spikes.first() {
-                let prompt = cie.field_context(spike);
-                match llm.chat(&prompt) {
-                    Ok(response) => {
-                        println!("  LLM: {}", response.trim());
-                        write_outbox(&outbox, "llm", response.trim());
-                        // Absorb the LLM response back into the field
-                        cie.queue(&response, "llm-response");
-                    }
-                    Err(e) => {
-                        eprintln!("  LLM error: {}", e);
+                let spike_pair = (spike.freq_a, spike.freq_b);
+                let is_novel = match cie.last_llm_spike {
+                    Some((la, lb)) => (la - spike_pair.0).abs() > 0.5
+                        || (lb - spike_pair.1).abs() > 0.5,
+                    None => true,
+                };
+                if is_novel {
+                    cie.last_llm_spike = Some(spike_pair);
+                    let prompt = cie.field_context(spike);
+                    match llm.chat(&prompt) {
+                        Ok(response) => {
+                            println!("  LLM: {}", response.trim());
+                            write_outbox(&outbox, "llm", response.trim());
+                            cie.queue(&response, "llm-response");
+                        }
+                        Err(e) => {
+                            eprintln!("  LLM error: {}", e);
+                        }
                     }
                 }
             }
         }
-        ticks_since_llm += 1;
 
-        // ── Periodic voice ──
-        ticks_since_voice += 1;
-        if ticks_since_voice >= 100 {
-            println!("  {}", cie.pulse());
-            ticks_since_voice = 0;
+        // ── Voice ──
+        // Speak when the field's shape has changed — not on a timer.
+        {
+            let current_coherence = cie.field.coherence();
+            let current_active = cie.field.active_count();
+            if (current_coherence - last_voice_coherence).abs() > 0.05
+                || current_active != last_voice_active
+            {
+                println!("  {}", cie.pulse());
+                last_voice_coherence = current_coherence;
+                last_voice_active = current_active;
+            }
         }
 
         // ── Save periodically ──
