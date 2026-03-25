@@ -651,4 +651,90 @@ impl Cie {
             state,
         )
     }
+
+    /// Save learned state (spike history + born lenses) to a text file.
+    /// This persists across daemon restarts — the field remembers what it learned.
+    pub fn save_learned(&self, path: &str) -> Result<(), String> {
+        let mut content = String::from("# seamus-field learned state\n");
+
+        // Save spike history
+        content += "# spike_history: freq_a freq_b count\n";
+        for &(fa, fb, count) in &self.spike_history {
+            content += &format!("{:.3} {:.3} {}\n", fa, fb, count);
+        }
+
+        // Save born lenses
+        content += "# born_lenses: freq_a freq_b name\n";
+        for lens in &self.lenses {
+            if lens.name.starts_with("spike-") {
+                if lens.sensitivities.len() >= 2 {
+                    content += &format!(
+                        "{:.3} {:.3} {}\n",
+                        lens.sensitivities[0].0,
+                        lens.sensitivities[1].0,
+                        lens.name,
+                    );
+                }
+            }
+        }
+
+        let tmp = format!("{}.tmp", path);
+        std::fs::write(&tmp, &content)
+            .map_err(|e| format!("write learned state: {}", e))?;
+        std::fs::rename(&tmp, path)
+            .map_err(|e| format!("rename learned state: {}", e))?;
+        Ok(())
+    }
+
+    /// Load learned state from a text file.
+    /// Restores spike history and re-creates born lenses.
+    pub fn load_learned(&mut self, path: &str) {
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+
+        let mut in_history = false;
+        let mut in_lenses = false;
+
+        for line in content.lines() {
+            if line.starts_with("# spike_history") {
+                in_history = true;
+                in_lenses = false;
+                continue;
+            }
+            if line.starts_with("# born_lenses") {
+                in_history = false;
+                in_lenses = true;
+                continue;
+            }
+            if line.starts_with('#') || line.trim().is_empty() {
+                continue;
+            }
+
+            let parts: Vec<&str> = line.split_whitespace().collect();
+
+            if in_history && parts.len() >= 3 {
+                if let (Ok(fa), Ok(fb), Ok(count)) = (
+                    parts[0].parse::<f64>(),
+                    parts[1].parse::<f64>(),
+                    parts[2].parse::<u32>(),
+                ) {
+                    self.spike_history.push((fa, fb, count));
+                }
+            }
+
+            if in_lenses && parts.len() >= 3 {
+                if let (Ok(fa), Ok(fb)) = (
+                    parts[0].parse::<f64>(),
+                    parts[1].parse::<f64>(),
+                ) {
+                    let name = parts[2].to_string();
+                    if !self.lenses.iter().any(|l| l.name == name) && self.lenses.len() < 12 {
+                        self.lenses.push(Lens::from_spike(fa, fb, &name));
+                    }
+                }
+            }
+        }
+    }
 }

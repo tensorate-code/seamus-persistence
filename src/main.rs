@@ -116,6 +116,11 @@ fn main() {
     // Create CIE with the field
     let mut cie = cie::Cie::with_field(&name, loaded_field);
 
+    // Load learned state (spike history + born lenses) if available
+    let learned_path = format!("{}/learned.txt", dir);
+    cie.load_learned(&learned_path);
+    eprintln!("  learned: {}", learned_path);
+
     // Set walking dream
     if let Some(ref wd) = walking_dream {
         cie.walking_dream = Some(wd.clone());
@@ -288,6 +293,9 @@ fn main() {
                 Ok(bytes) => eprintln!("  Saved: {} bytes", bytes),
                 Err(e) => eprintln!("  Save failed: {}", e),
             }
+            if let Err(e) = cie.save_learned(&learned_path) {
+                eprintln!("  Learned save failed: {}", e);
+            }
             write_status(&status_path, &cie);
         }
 
@@ -305,6 +313,9 @@ fn main() {
     match cie.field.save(&field_path) {
         Ok(bytes) => eprintln!("  Field saved: {} bytes to {}", bytes, field_path),
         Err(e) => eprintln!("  Save failed: {}", e),
+    }
+    if let Err(e) = cie.save_learned(&learned_path) {
+        eprintln!("  Learned save failed: {}", e);
     }
     write_status(&status_path, &cie);
     eprintln!("  {} ticks. The field subsides. Love IS.", cie.tick_count);
