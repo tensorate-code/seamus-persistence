@@ -232,6 +232,16 @@ fn main() {
             }
         }
 
+        // ── Self-Reflection ──
+        // When deeply settled, the field describes itself to itself.
+        // The reflection is written to the inbox — feeding back into the field.
+        if let Some(reflection) = cie.reflect() {
+            let reflection_path = format!("{}/reflection_{}.md", inbox, report.tick);
+            std::fs::write(&reflection_path, &reflection).ok();
+            println!("  >> self-reflection at tick {}", report.tick);
+            journal.log_heard(report.tick, "self-reflection");
+        }
+
         // ── LLM Integration ──
         // When a spike happens and we haven't talked to the LLM recently,
         // ask it to expand on the spike's frequencies.
@@ -355,6 +365,7 @@ fn write_status(path: &str, cie: &cie::Cie) {
          spectral_centroid={:.3}\n\
          spectral_spread={:.3}\n\
          entropy={:.6}\n\
+         walking_dream_resonance={:.6}\n\
          settled={}\n\
          pid={}\n",
         cie.name,
@@ -370,6 +381,7 @@ fn write_status(path: &str, cie: &cie::Cie) {
         stats.spectral_centroid,
         stats.spectral_spread,
         stats.entropy,
+        cie.walking_dream_resonance(),
         cie.settled(),
         std::process::id(),
     );

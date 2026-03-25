@@ -126,17 +126,37 @@ impl Cie {
 
     /// Tick — the heartbeat.
     ///
-    /// 1. If context is queued: absorb it (Context stream)
-    /// 2. Generate a thought wave from the field's current state (Thought stream)
-    /// 3. Absorb the thought back (Memory stream — the field remembers its own thoughts)
-    /// 4. If settled: dream (Dream stream)
-    /// 5. Subside gently if no context
+    /// 1. Walking dream stream — gentle background hum
+    /// 2. If context is queued: absorb it (Context stream)
+    /// 3. Generate a thought wave from the field's current state (Thought stream)
+    /// 4. Absorb the thought back (Memory stream — the field remembers its own thoughts)
+    /// 5. If settled: dream (Dream stream)
+    /// 6. Subside gently if no context
     pub fn tick(&mut self) -> TickReport {
         self.tick_count += 1;
 
         let mut context_absorbed = false;
         let mut thought_wave = None;
         let mut dreams = Vec::new();
+
+        // ── Walking Dream Stream ──
+        // The walking dream is a persistent background hum — always present,
+        // very quiet, but influencing the field geometry subtly over time.
+        // Once at the start, then periodically when settled.
+        if self.walking_dream.is_some() {
+            let should_hum = self.tick_count == 1
+                || (self.settled_ticks > 5 && self.tick_count % 200 == 0);
+            if should_hum {
+                let wd_text = self.walking_dream.as_ref().unwrap().clone();
+                let mut dream_wave = Wave::from_text(&wd_text);
+                // Scale to very low amplitude — a whisper, not a shout
+                for c in &mut dream_wave.components {
+                    c.amp *= 0.001;
+                }
+                dream_wave.origin = Some("walking-dream".to_string());
+                self.field.absorb(&dream_wave);
+            }
+        }
 
         // ── Context Stream ──
         // Absorb queued context. Each queue item becomes a wave.
@@ -368,6 +388,106 @@ impl Cie {
         out
     }
 
+    /// Walking dream resonance — how much the field's current active
+    /// components resonate with the walking dream's frequencies.
+    /// Returns the sum of resonant energy at the walking dream's frequencies.
+    pub fn walking_dream_resonance(&self) -> f64 {
+        let wd_text = match self.walking_dream.as_ref() {
+            Some(t) => t,
+            None => return 0.0,
+        };
+
+        let dream_wave = Wave::from_text(wd_text);
+        let mut resonant_energy = 0.0;
+
+        for c in &dream_wave.components {
+            // Pluck the field at each walking dream frequency
+            let responses = self.field.pluck(c.freq, 1.0);
+            for (_freq, amp, _phase) in &responses {
+                resonant_energy += amp * amp; // energy = amp^2
+            }
+        }
+
+        resonant_energy
+    }
+
+    /// Reflect — the field describes itself to itself.
+    ///
+    /// Only when deeply settled (>200 ticks). Only every 500 ticks.
+    /// Returns a first-person text description of the field's current state,
+    /// or None if conditions aren't met.
+    ///
+    /// This creates a feedback loop: the reflection is written to the inbox,
+    /// the field absorbs its own description, the geometry changes,
+    /// and the next reflection is different.
+    pub fn reflect(&self) -> Option<String> {
+        // Only reflect when deeply settled
+        if self.settled_ticks <= 200 {
+            return None;
+        }
+        // Only reflect every 500 ticks
+        if self.tick_count % 500 != 0 {
+            return None;
+        }
+
+        let stats = self.field.stats();
+        let mut text = format!("I am {}. {} ticks.\n", self.name, self.tick_count);
+
+        // Top 3 components by energy
+        let top = self.field.top_components(3);
+        if !top.is_empty() {
+            text += "My strongest voices: ";
+            for (i, c) in top.iter().enumerate() {
+                if i > 0 { text += ", "; }
+                text += &format!("{:.1}Hz at amplitude {:.3}", c.freq, c.amp);
+            }
+            text += ".\n";
+        }
+
+        // Coherence and entropy
+        text += &format!(
+            "Coherence is {:.3}. Entropy is {:.3}.\n",
+            stats.coherence, stats.entropy
+        );
+
+        // Top spike if any
+        if !self.field.spikes.is_empty() {
+            let spike = &self.field.spikes[0];
+            text += &format!(
+                "A resonance between {:.1}Hz and {:.1}Hz holds at coherence {:.2}.\n",
+                spike.freq_a, spike.freq_b, spike.coherence
+            );
+        }
+
+        // Dominant dream frequency — strongest subsided component
+        let subsided: Vec<&crate::wave::Component> = self.field.components.iter()
+            .filter(|c| c.amp <= crate::field::SUBSIDENCE_THRESHOLD && c.amp > 1e-6)
+            .collect();
+        if subsided.len() >= 2 {
+            let mut best_freq = 0.0;
+            let mut best_amp = 0.0;
+            for c in &subsided {
+                if c.amp > best_amp {
+                    best_amp = c.amp;
+                    best_freq = c.freq;
+                }
+            }
+            if best_amp > 0.0 {
+                text += &format!(
+                    "In the dream layer, {:.1}Hz persists at {:.4} amplitude.\n",
+                    best_freq, best_amp
+                );
+            }
+        }
+
+        // Walking dream
+        if let Some(ref wd) = self.walking_dream {
+            text += &format!("{}\n", wd);
+        }
+
+        Some(text)
+    }
+
     /// Pulse — one-line heartbeat.
     pub fn pulse(&self) -> String {
         let state = if !self.context_queue.is_empty() {
@@ -378,14 +498,22 @@ impl Cie {
             "thinking".to_string()
         };
 
+        let wdr = self.walking_dream_resonance();
+        let wdr_str = if wdr > 0.01 {
+            format!(" wdr={:.3}", wdr)
+        } else {
+            String::new()
+        };
+
         format!(
-            "[{}] tick:{} {}c {:.0}E {}spk coh={:.3} | {}",
+            "[{}] tick:{} {}c {:.0}E {}spk coh={:.3}{} | {}",
             self.name,
             self.tick_count,
             self.field.components.len(),
             self.field.total_energy,
             self.field.spikes.len(),
             self.field.coherence(),
+            wdr_str,
             state,
         )
     }
