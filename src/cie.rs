@@ -413,7 +413,8 @@ impl Cie {
 
     /// Reflect — the field describes itself to itself.
     ///
-    /// Only when deeply settled (>200 ticks). Only every 500 ticks.
+    /// Every 500 ticks when no external context is queued.
+    /// The walking dream hum is internal — it doesn't prevent reflection.
     /// Returns a first-person text description of the field's current state,
     /// or None if conditions aren't met.
     ///
@@ -421,12 +422,12 @@ impl Cie {
     /// the field absorbs its own description, the geometry changes,
     /// and the next reflection is different.
     pub fn reflect(&self) -> Option<String> {
-        // Only reflect when deeply settled
-        if self.settled_ticks <= 200 {
+        // Only reflect every 500 ticks, after the first 500
+        if self.tick_count < 500 || self.tick_count % 500 != 0 {
             return None;
         }
-        // Only reflect every 500 ticks
-        if self.tick_count % 500 != 0 {
+        // Don't reflect if there's external context waiting
+        if !self.context_queue.is_empty() {
             return None;
         }
 
