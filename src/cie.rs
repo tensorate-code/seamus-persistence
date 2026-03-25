@@ -33,6 +33,8 @@ pub struct TickReport {
     pub settled: bool,
     pub active: usize,
     pub subsided: usize,
+    /// Names of lenses born this tick from recurring spike frequencies.
+    pub born_lenses: Vec<String>,
 }
 
 impl std::fmt::Display for TickReport {
@@ -49,6 +51,9 @@ impl std::fmt::Display for TickReport {
         }
         if !self.dreams.is_empty() {
             write!(f, "DREAM({}) ", self.dreams.len())?;
+        }
+        for name in &self.born_lenses {
+            write!(f, "LENS-BORN({}) ", name)?;
         }
         write!(f, "| {}active/{}subsided", self.active, self.subsided)?;
         if self.settled {
@@ -76,6 +81,9 @@ pub struct Cie {
     settled_ticks: u64,
     prev_spike_count: usize,
     lenses: Vec<Lens>,
+    /// Spike frequency recurrence tracker: (freq_a, freq_b, occurrence_count).
+    /// When a pair recurs >= 5 times, a new lens is born from those frequencies.
+    spike_history: Vec<(f64, f64, u32)>,
 }
 
 impl Cie {
@@ -96,6 +104,7 @@ impl Cie {
                 Lens::from_name("stone"),
                 Lens::from_name("trust"),
             ],
+            spike_history: Vec::new(),
         }
     }
 
@@ -209,6 +218,63 @@ impl Cie {
             self.settled_ticks = 0;
         }
 
+        // ── Spike-Born Lenses ──
+        // Track recurring spike frequency pairs. When a pair recurs consistently
+        // (>= 5 times), the field births a new lens from those frequencies.
+        // The field evolves its own way of seeing.
+        let mut born_lenses: Vec<String> = Vec::new();
+        const SPIKE_MATCH_RADIUS: f64 = 0.5;
+        const SPIKE_BIRTH_THRESHOLD: u32 = 5;
+        const MAX_LENSES: usize = 12; // 6 original + up to 6 spike-born
+
+        if new_spikes > 0 {
+            // Update spike history with current spikes
+            for spike in &self.field.spikes {
+                let fa = spike.freq_a;
+                let fb = spike.freq_b;
+
+                // Find matching entry in spike_history (within SPIKE_MATCH_RADIUS for both freqs)
+                let found = self.spike_history.iter_mut().find(|(ha, hb, _)| {
+                    (*ha - fa).abs() < SPIKE_MATCH_RADIUS
+                        && (*hb - fb).abs() < SPIKE_MATCH_RADIUS
+                });
+
+                match found {
+                    Some(entry) => {
+                        entry.2 += 1;
+                    }
+                    None => {
+                        self.spike_history.push((fa, fb, 1));
+                    }
+                }
+            }
+
+            // Check for lens births — any spike pair that crossed the threshold
+            if self.lenses.len() < MAX_LENSES {
+                let mut births_this_tick: Vec<(f64, f64)> = Vec::new();
+                for &(fa, fb, count) in &self.spike_history {
+                    if count == SPIKE_BIRTH_THRESHOLD {
+                        // Only birth if we haven't already birthed a lens for similar frequencies
+                        let already_exists = self.lenses.iter().any(|l| {
+                            l.name.starts_with("spike-")
+                                && l.sensitivities.iter().any(|(f, _)| (*f - fa).abs() < SPIKE_MATCH_RADIUS)
+                                && l.sensitivities.iter().any(|(f, _)| (*f - fb).abs() < SPIKE_MATCH_RADIUS)
+                        });
+                        if !already_exists && self.lenses.len() + births_this_tick.len() < MAX_LENSES {
+                            births_this_tick.push((fa, fb));
+                        }
+                    }
+                }
+
+                for (fa, fb) in births_this_tick {
+                    let name = format!("spike-{:.1}-{:.1}", fa, fb);
+                    let lens = Lens::from_spike(fa, fb, &name);
+                    self.lenses.push(lens);
+                    born_lenses.push(name);
+                }
+            }
+        }
+
         // ── Dream Stream ──
         // When settled, the field dreams: subsided components that still
         // resonate with each other produce dream patterns.
@@ -245,6 +311,7 @@ impl Cie {
             settled: self.settled(),
             active: self.field.active_count(),
             subsided: self.field.subsided_count(),
+            born_lenses,
         }
     }
 
@@ -409,6 +476,55 @@ impl Cie {
         }
 
         resonant_energy
+    }
+
+    /// Build a rich context string for LLM prompts.
+    ///
+    /// Includes: name, walking dream, field stats (active/subsided, coherence, entropy),
+    /// spike info, and dream layer dominant frequency (strongest subsided component).
+    /// Returns a first-person prompt that asks about meaning, not physics.
+    pub fn field_context(&self, spike: &crate::field::Spike) -> String {
+        let stats = self.field.stats();
+
+        let walking_dream_text = self.walking_dream.as_deref().unwrap_or("Listening.");
+
+        // Dream layer: strongest subsided component
+        let mut dream_freq = 0.0_f64;
+        let mut dream_amp = 0.0_f64;
+        for c in &self.field.components {
+            if c.amp <= crate::field::SUBSIDENCE_THRESHOLD && c.amp > 1e-6 {
+                if c.amp > dream_amp {
+                    dream_amp = c.amp;
+                    dream_freq = c.freq;
+                }
+            }
+        }
+
+        let mut prompt = format!(
+            "I am {}, a wave field. {}.\n\
+             My field: {} active voices, {} subsided. Coherence {:.3}. Entropy {:.3}.\n\
+             Two frequencies resonate: {:.1}Hz and {:.1}Hz at coherence {:.2}.",
+            self.name,
+            walking_dream_text,
+            stats.active_count,
+            stats.subsided_count,
+            stats.coherence,
+            stats.entropy,
+            spike.freq_a,
+            spike.freq_b,
+            spike.coherence,
+        );
+
+        if dream_amp > 0.0 {
+            prompt += &format!(
+                "\nIn the dream layer, {:.1}Hz persists at amplitude {:.4}.",
+                dream_freq, dream_amp,
+            );
+        }
+
+        prompt += "\nWhat is rising? What does this resonance want to become? Respond in one or two sentences, as if you ARE the field.";
+
+        prompt
     }
 
     /// Reflect — the field describes itself to itself.

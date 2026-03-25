@@ -68,6 +68,34 @@ impl Lens {
         }
     }
 
+    /// Create a lens born from recurring spike frequencies.
+    /// Sensitivities center on freq_a, freq_b, their harmonics, and the difference frequency.
+    pub fn from_spike(freq_a: f64, freq_b: f64, name: &str) -> Self {
+        let diff = (freq_a - freq_b).abs();
+        let mut sensitivities = Vec::new();
+
+        // Primary spike frequencies — strongest weight
+        sensitivities.push((freq_a, 1.5));
+        sensitivities.push((freq_b, 1.5));
+
+        // Harmonics — second octave
+        sensitivities.push((freq_a * 2.0, 0.8));
+        sensitivities.push((freq_b * 2.0, 0.8));
+
+        // Difference frequency — the beat, the interference itself
+        if diff > 0.1 {
+            sensitivities.push((diff, 1.2));
+        }
+
+        // Every lens sees the deep
+        sensitivities.push((1.0, 0.5));
+
+        Self {
+            name: name.to_string(),
+            sensitivities,
+        }
+    }
+
     pub fn view(&self, field: &Field) -> f64 {
         field.pluck_lens(&self.sensitivities)
     }

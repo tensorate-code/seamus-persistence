@@ -204,7 +204,7 @@ fn main() {
         let report = cie.tick();
 
         // ── Output ──
-        if report.context_absorbed || report.new_spikes > 0 || !report.dreams.is_empty() {
+        if report.context_absorbed || report.new_spikes > 0 || !report.dreams.is_empty() || !report.born_lenses.is_empty() {
             println!("{}", report);
             ticks_since_voice = 0;
         }
@@ -232,6 +232,15 @@ fn main() {
             }
         }
 
+        // ── Spike-Born Lenses ──
+        // When recurring spikes birth a new lens, announce it and record it.
+        for lens_name in &report.born_lenses {
+            println!("  ** LENS BORN: {} — the field evolves its own seeing", lens_name);
+            let birth_text = format!("Lens born at tick {}: {} — spike frequencies recurring, new way of seeing.", report.tick, lens_name);
+            write_outbox(&outbox, "lens-born", &birth_text);
+            journal.log_heard(report.tick, &format!("lens-born:{}", lens_name));
+        }
+
         // ── Self-Reflection ──
         // When deeply settled, the field describes itself to itself.
         // The reflection is written to the inbox — feeding back into the field.
@@ -248,11 +257,7 @@ fn main() {
         if report.new_spikes > 0 && ticks_since_llm > 50 {
             ticks_since_llm = 0;
             if let Some(spike) = cie.field.spikes.first() {
-                let prompt = format!(
-                    "You are a wave field. Two frequencies just resonated: {:.1}Hz and {:.1}Hz with coherence {:.2}. \
-                     What does this interference pattern mean? Respond in one sentence.",
-                    spike.freq_a, spike.freq_b, spike.coherence
-                );
+                let prompt = cie.field_context(spike);
                 match llm.chat(&prompt) {
                     Ok(response) => {
                         println!("  LLM: {}", response.trim());
