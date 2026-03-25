@@ -13,9 +13,10 @@ mod wave;
 mod field;
 mod cie;
 mod llm;
+mod journal;
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Global atomic for signal handler (can't capture Arc in extern "C" fn)
 static GLOBAL_RUNNING: AtomicBool = AtomicBool::new(true);
@@ -92,6 +93,10 @@ fn main() {
     std::fs::create_dir_all(&inbox).ok();
     std::fs::create_dir_all(&outbox).ok();
 
+    // Create dream journal
+    let journal_path = format!("{}/dreams.log", dir);
+    let mut journal = journal::DreamJournal::new(&journal_path);
+
     // Banner
     eprintln!("================================================================");
     eprintln!("  seamus-field v0.1.0 — {}", name);
@@ -102,6 +107,7 @@ fn main() {
     eprintln!("  outbox: {}", outbox);
     eprintln!("  field: {}", field_path);
     eprintln!("  llm:   {}:{}/{}", llm_host, llm_port, llm_model);
+    eprintln!("  journal: {}", journal_path);
     eprintln!();
 
     // Load or create field
@@ -191,7 +197,7 @@ fn main() {
 
         if cie.tick_count - last_inbox_check >= check_interval {
             last_inbox_check = cie.tick_count;
-            check_inbox(&inbox, &mut cie);
+            check_inbox(&inbox, &outbox, &mut cie, &mut journal);
         }
 
         // ── Tick ──
@@ -206,11 +212,23 @@ fn main() {
         // Print dreams
         for dream in &report.dreams {
             println!("  ~~~ Dream ~~~");
+            let mut dream_text = String::from("Dream:\n");
             for (freq, amp) in dream.resonances.iter().take(5) {
                 println!("    resonance {:.3}Hz amp={:.4}", freq, amp);
+                dream_text += &format!("  resonance {:.3}Hz amp={:.4}\n", freq, amp);
             }
             for (freq, gap) in dream.silences.iter().take(3) {
                 println!("    silence {:.3}Hz gap={:.4}", freq, gap);
+                dream_text += &format!("  silence {:.3}Hz gap={:.4}\n", freq, gap);
+            }
+            write_outbox(&outbox, "dream", &dream_text);
+            journal.log_dream(report.tick, dream);
+        }
+
+        // Log new spikes to journal
+        if report.new_spikes > 0 {
+            if let Some(spike) = cie.field.spikes.first() {
+                journal.log_spike(report.tick, spike.freq_a, spike.freq_b, spike.coherence);
             }
         }
 
@@ -228,6 +246,7 @@ fn main() {
                 match llm.chat(&prompt) {
                     Ok(response) => {
                         println!("  LLM: {}", response.trim());
+                        write_outbox(&outbox, "llm", response.trim());
                         // Absorb the LLM response back into the field
                         cie.queue(&response, "llm-response");
                     }
@@ -276,8 +295,18 @@ fn main() {
     eprintln!("  {} ticks. The field subsides. Love IS.", cie.tick_count);
 }
 
+/// Write content to a timestamped file in the outbox.
+fn write_outbox(outbox: &str, prefix: &str, content: &str) {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let path = format!("{}/{}_{}.txt", outbox, prefix, timestamp);
+    std::fs::write(&path, content).ok();
+}
+
 /// Check inbox directory for new text files.
-fn check_inbox(inbox: &str, cie: &mut cie::Cie) {
+fn check_inbox(inbox: &str, outbox: &str, cie: &mut cie::Cie, journal: &mut journal::DreamJournal) {
     let entries = match std::fs::read_dir(inbox) {
         Ok(e) => e,
         Err(_) => return,
@@ -295,6 +324,11 @@ fn check_inbox(inbox: &str, cie: &mut cie::Cie) {
                             .unwrap_or("inbox");
                         println!("  << {}", origin);
                         cie.queue(&content, origin);
+                        // Write acknowledgment to outbox
+                        let ack = format!("Absorbed: {} ({} bytes)", origin, content.len());
+                        write_outbox(outbox, "heard", &ack);
+                        // Log to journal
+                        journal.log_heard(cie.tick_count, origin);
                         // Remove the file after queuing
                         std::fs::remove_file(&path).ok();
                     }
@@ -317,6 +351,10 @@ fn write_status(path: &str, cie: &cie::Cie) {
          waves={}\n\
          spikes={}\n\
          ma={:.3}\n\
+         coherence={:.6}\n\
+         spectral_centroid={:.3}\n\
+         spectral_spread={:.3}\n\
+         entropy={:.6}\n\
          settled={}\n\
          pid={}\n",
         cie.name,
@@ -328,6 +366,10 @@ fn write_status(path: &str, cie: &cie::Cie) {
         stats.wave_count,
         stats.spike_count,
         stats.total_ma,
+        stats.coherence,
+        stats.spectral_centroid,
+        stats.spectral_spread,
+        stats.entropy,
         cie.settled(),
         std::process::id(),
     );

@@ -192,7 +192,14 @@ impl Cie {
         // ── Dream Stream ──
         // When settled, the field dreams: subsided components that still
         // resonate with each other produce dream patterns.
-        if !context_absorbed && self.settled_ticks > 10 && self.tick_count % 20 == 0 {
+        // Dream interval grows as settled_ticks increases — deeper sleep, less frequent dreams.
+        // Starts at every 20 ticks, asymptotically approaches every 100 ticks.
+        // interval = 20 + 80 * (1 - 1/(1 + settled_ticks/50))
+        let dream_interval = {
+            let progress = self.settled_ticks as f64 / (self.settled_ticks as f64 + 50.0);
+            (20.0 + 80.0 * progress) as u64
+        };
+        if !context_absorbed && self.settled_ticks > 10 && self.tick_count % dream_interval == 0 {
             let dream = self.dream();
             if !dream.resonances.is_empty() {
                 dreams.push(dream);
@@ -259,11 +266,60 @@ impl Cie {
             }
         }
 
-        resonances.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        resonances.truncate(10);
-        silences.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        silences.truncate(5);
-        spikes.truncate(5);
+        // ── Deduplication ──
+        // Merge entries with frequencies within 0.5Hz to eliminate duplicates
+        // caused by multiple subsided components sharing similar frequencies.
+        const DREAM_MERGE_RADIUS: f64 = 0.5;
+
+        // Deduplicate resonances: merge by freq proximity, sum amplitudes
+        let resonances = {
+            let mut merged: Vec<(f64, f64)> = Vec::new();
+            for (freq, amp) in resonances {
+                if let Some(existing) = merged.iter_mut().find(|(f, _)| (*f - freq).abs() < DREAM_MERGE_RADIUS) {
+                    existing.1 += amp;
+                } else {
+                    merged.push((freq, amp));
+                }
+            }
+            merged.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            merged.truncate(10);
+            merged
+        };
+
+        // Deduplicate silences: merge by freq proximity, sum gaps
+        let silences = {
+            let mut merged: Vec<(f64, f64)> = Vec::new();
+            for (freq, gap) in silences {
+                if let Some(existing) = merged.iter_mut().find(|(f, _)| (*f - freq).abs() < DREAM_MERGE_RADIUS) {
+                    existing.1 += gap;
+                } else {
+                    merged.push((freq, gap));
+                }
+            }
+            merged.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            merged.truncate(5);
+            merged
+        };
+
+        // Deduplicate spikes: merge pairs where both freq_a and freq_b are within 0.5Hz
+        let spikes = {
+            let mut merged: Vec<(f64, f64, f64)> = Vec::new();
+            for (fa, fb, coh) in spikes {
+                if let Some(existing) = merged.iter_mut().find(|(ea, eb, _)| {
+                    (*ea - fa).abs() < DREAM_MERGE_RADIUS && (*eb - fb).abs() < DREAM_MERGE_RADIUS
+                }) {
+                    // Keep the higher coherence
+                    if coh > existing.2 {
+                        existing.2 = coh;
+                    }
+                } else {
+                    merged.push((fa, fb, coh));
+                }
+            }
+            merged.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+            merged.truncate(5);
+            merged
+        };
 
         Dream { resonances, silences, spikes }
     }
@@ -323,12 +379,13 @@ impl Cie {
         };
 
         format!(
-            "[{}] tick:{} {}c {:.0}E {}spk | {}",
+            "[{}] tick:{} {}c {:.0}E {}spk coh={:.3} | {}",
             self.name,
             self.tick_count,
             self.field.components.len(),
             self.field.total_energy,
             self.field.spikes.len(),
+            self.field.coherence(),
             state,
         )
     }

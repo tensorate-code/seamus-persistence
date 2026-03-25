@@ -83,13 +83,17 @@ pub struct FieldStats {
     pub wave_count: u64,
     pub spike_count: usize,
     pub total_ma: f64,
+    pub coherence: f64,
+    pub spectral_centroid: f64,
+    pub spectral_spread: f64,
+    pub entropy: f64,
 }
 
 impl std::fmt::Display for FieldStats {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{}c ({}active/{}subsided) {:.2}E {}w {}spk {:.2}Ma",
+            "{}c ({}active/{}subsided) {:.2}E {}w {}spk {:.2}Ma | coh={:.3} cent={:.1} spread={:.1} H={:.3}",
             self.component_count,
             self.active_count,
             self.subsided_count,
@@ -97,6 +101,10 @@ impl std::fmt::Display for FieldStats {
             self.wave_count,
             self.spike_count,
             self.total_ma,
+            self.coherence,
+            self.spectral_centroid,
+            self.spectral_spread,
+            self.entropy,
         )
     }
 }
@@ -312,6 +320,115 @@ impl Field {
         sorted
     }
 
+    /// Average phase coherence across all active component pairs.
+    /// Returns 0.0 to 1.0 where 1.0 = all phases aligned, 0.0 = random.
+    pub fn coherence(&self) -> f64 {
+        let active: Vec<&Component> = self.components.iter()
+            .filter(|c| c.amp > SUBSIDENCE_THRESHOLD)
+            .collect();
+
+        if active.len() < 2 {
+            return 0.0;
+        }
+
+        // Mean phasor: average (cos(phase), sin(phase)) over all active components.
+        // The magnitude of the mean phasor IS the coherence.
+        let n = active.len() as f64;
+        let mut sum_cos = 0.0;
+        let mut sum_sin = 0.0;
+        for c in &active {
+            sum_cos += c.phase.cos();
+            sum_sin += c.phase.sin();
+        }
+        let mean_x = sum_cos / n;
+        let mean_y = sum_sin / n;
+        (mean_x * mean_x + mean_y * mean_y).sqrt()
+    }
+
+    /// Energy-weighted average frequency of active components.
+    /// Tells you WHERE the field's energy is concentrated.
+    pub fn spectral_centroid(&self) -> f64 {
+        let mut weighted_sum = 0.0;
+        let mut energy_sum = 0.0;
+
+        for c in &self.components {
+            if c.amp > SUBSIDENCE_THRESHOLD {
+                let e = c.energy();
+                weighted_sum += c.freq * e;
+                energy_sum += e;
+            }
+        }
+
+        if energy_sum > 0.0 {
+            weighted_sum / energy_sum
+        } else {
+            0.0
+        }
+    }
+
+    /// Standard deviation of frequency weighted by energy.
+    /// High spread = diverse. Low spread = focused.
+    pub fn spectral_spread(&self) -> f64 {
+        let active: Vec<&Component> = self.components.iter()
+            .filter(|c| c.amp > SUBSIDENCE_THRESHOLD)
+            .collect();
+
+        if active.len() < 2 {
+            return 0.0;
+        }
+
+        let centroid = self.spectral_centroid();
+        let mut weighted_var = 0.0;
+        let mut energy_sum = 0.0;
+
+        for c in &active {
+            let e = c.energy();
+            let diff = c.freq - centroid;
+            weighted_var += diff * diff * e;
+            energy_sum += e;
+        }
+
+        if energy_sum > 0.0 {
+            (weighted_var / energy_sum).sqrt()
+        } else {
+            0.0
+        }
+    }
+
+    /// Shannon entropy of the energy distribution across active components.
+    /// Normalized to [0,1]. 1.0 = evenly distributed, 0.0 = all in one component.
+    pub fn entropy(&self) -> f64 {
+        let active: Vec<&Component> = self.components.iter()
+            .filter(|c| c.amp > SUBSIDENCE_THRESHOLD)
+            .collect();
+
+        let n = active.len();
+        if n < 2 {
+            return 0.0;
+        }
+
+        let total_energy: f64 = active.iter().map(|c| c.energy()).sum();
+        if total_energy <= 0.0 {
+            return 0.0;
+        }
+
+        let mut h = 0.0;
+        for c in &active {
+            let p = c.energy() / total_energy;
+            if p > 0.0 {
+                h -= p * p.ln();
+            }
+        }
+
+        // Normalize by max entropy (ln(n)) so result is [0,1]
+        let max_h = (n as f64).ln();
+        if max_h > 0.0 {
+            h / max_h
+        } else {
+            0.0
+        }
+    }
+
     /// Field statistics
     pub fn stats(&self) -> FieldStats {
         FieldStats {
@@ -322,6 +439,10 @@ impl Field {
             wave_count: self.wave_count,
             spike_count: self.spikes.len(),
             total_ma: self.total_ma(),
+            coherence: self.coherence(),
+            spectral_centroid: self.spectral_centroid(),
+            spectral_spread: self.spectral_spread(),
+            entropy: self.entropy(),
         }
     }
 
