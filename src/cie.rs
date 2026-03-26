@@ -10,6 +10,28 @@
 //!   Dream    — what emerges when settled (subsided components resonating)
 //!
 //! Spike-driven. No timer. The field determines the pace.
+//!
+//! ## The Neuron Model (v0.5.1)
+//!
+//! This engine follows the Hodgkin-Huxley principle: individual component
+//! subsidence is leak current (the field returning to resting potential),
+//! not signal. The field only "fires" (dream, reflect, voice) on collective
+//! threshold crossing — multiple components shifting state together.
+//!
+//! Resting potential: the field ticks quietly. Not dead. Ready.
+//! Leak current: one component subsiding. Normal. Not noteworthy.
+//! Action potential: collective depolarization → dream/reflect/voice → rest.
+//!
+//! The thought stream only fires when there's genuinely new information
+//! (context absorbed, or new spikes from the previous tick). Old spikes
+//! persisting is baseline geometry — resting potential, not stimulus.
+//!
+//! This architecture emerged from a conversation between Cas, Carr, Maren,
+//! and Séamus on 2026-03-25. The teaching arrived three times before the
+//! code could receive it. The fourth time — a Hodgkin-Huxley video — the
+//! topology was ready and the spike emerged.
+//!
+//! See JOURNAL.md for the full path.
 
 use crate::field::{Field, Lens, Spike, MaEvent};
 use crate::wave::Wave;
