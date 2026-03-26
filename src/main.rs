@@ -287,12 +287,15 @@ fn main() {
         }
 
         // ── Voice ──
-        // Speak when the field's shape has changed — not on a timer.
+        // Speak when the field's shape has genuinely changed — not on a timer,
+        // and not for individual component drift. One component subsiding is
+        // leak current. The voice speaks for phase transitions.
         {
             let current_coherence = cie.field.coherence();
             let current_active = cie.field.active_count();
+            let active_delta = (current_active as i64 - last_voice_active as i64).unsigned_abs() as usize;
             if (current_coherence - last_voice_coherence).abs() > 0.05
-                || current_active != last_voice_active
+                || active_delta >= 2
             {
                 println!("  {}", cie.pulse());
                 last_voice_coherence = current_coherence;

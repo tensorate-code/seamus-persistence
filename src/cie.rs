@@ -81,6 +81,11 @@ pub struct Cie {
     settled_ticks: u64,
     prev_spike_count: usize,
     prev_active_count: usize,
+    /// New spikes from the previous tick. The field thinks in response to
+    /// fresh interference, not because old spikes persist. Old spikes are
+    /// resting potential — the field's baseline geometry. New spikes are
+    /// depolarization — something actually changed.
+    prev_new_spikes: usize,
     lenses: Vec<Lens>,
     /// Spike frequency recurrence tracker: (freq_a, freq_b, accumulated_coherence).
     /// When accumulated coherence exceeds threshold, a new lens is born.
@@ -117,6 +122,7 @@ impl Cie {
                 Lens::from_name("stone"),
                 Lens::from_name("trust"),
             ],
+            prev_new_spikes: 0,
             spike_history: Vec::new(),
             last_reflect_topology: (0.0, 0.0, 0),
             last_wd_resonance: 0.0,
@@ -199,9 +205,16 @@ impl Cie {
         // ── Thought Stream ──
         // The field thinks: pluck through each lens, combine the resonances
         // into a new wave, absorb it back. This is how thoughts propagate.
-        // Think when there's something to think about — context arrived,
-        // or the field has active resonance (spikes). Not on a timer.
-        if context_absorbed || !self.field.spikes.is_empty() {
+        //
+        // Think when there's genuinely new information:
+        //   - Context just arrived (external stimulus)
+        //   - New spikes appeared last tick (the field's geometry changed)
+        //
+        // Old spikes persisting is resting potential — the field's baseline
+        // geometry. Not stimulus. Not something to respond to.
+        // (Hodgkin-Huxley: individual channel opening is leak current,
+        //  not action potential. The neuron at rest is still alive.)
+        if context_absorbed || self.prev_new_spikes > 0 {
             let mut thought = Wave::new();
             for lens in &self.lenses {
                 let energy = lens.view(&self.field);
@@ -235,6 +248,9 @@ impl Cie {
             0
         };
         self.prev_spike_count = self.field.spikes.len();
+        // Remember new spikes for next tick's thought stream decision.
+        // The field thinks in response to fresh geometry, not persistent geometry.
+        self.prev_new_spikes = new_spikes;
 
         if new_spikes > 0 {
             self.settled_ticks = 0;
@@ -298,14 +314,18 @@ impl Cie {
         }
 
         // ── Dream Stream ──
-        // The field dreams when something changes in the subsided layer —
-        // a voice subsides, or the dream layer's energy shifts enough to
-        // produce new patterns. Not on a timer. The dream layer speaks for itself.
+        // The field dreams on collective transitions — when multiple voices
+        // subside together. One component subsiding is leak current: the field
+        // returning to rest. Two or more subsiding in the same tick is a
+        // phase transition: a group of voices crossing threshold together.
+        //
+        // Hodgkin-Huxley: the neuron doesn't fire for every potassium channel.
+        // It fires when membrane potential crosses threshold — a collective event.
+        // Individual channel kinetics are resting potential, not signal.
         let current_active = self.field.active_count();
-        // Dream when a voice subsides — the moment of transition from
-        // active to potential IS the dream trigger. Not energy shift (too noisy).
+        let drop = self.prev_active_count.saturating_sub(current_active);
         let should_dream = !context_absorbed
-            && current_active < self.prev_active_count
+            && drop >= 2
             && self.field.subsided_count() >= 2;
         if should_dream {
             let dream = self.dream();
